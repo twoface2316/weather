@@ -6,15 +6,18 @@
 <meta name="theme-color" content="#141a24">
 <title>Weather — Oswego</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⛅</text></svg>">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <style>
   :root{
     --bg:#f2f4f7; --card:#ffffff; --ink:#1c2430; --soft:#5d6a7c; --line:#e2e6ec;
     --accent:#2563a8; --accent-soft:#e3edf7; --warm:#b45309; --rain:#3b82c4;
+    --alert-red:#b3352e; --alert-red-soft:#fbe9e7; --alert-amber:#92600a; --alert-amber-soft:#fdf3dd;
   }
   @media (prefers-color-scheme: dark){
     :root{
       --bg:#12161d; --card:#1b212b; --ink:#e3e8ee; --soft:#93a0b1; --line:#2a323e;
       --accent:#6aa7dd; --accent-soft:#1e2c3b; --warm:#e0a35c; --rain:#7db4e0;
+      --alert-red:#e88a83; --alert-red-soft:#3a2220; --alert-amber:#e3b566; --alert-amber-soft:#33290f;
     }
   }
   *{box-sizing:border-box}
@@ -38,11 +41,37 @@
   .now .emoji{font-size:52px; line-height:1}
   .now .temp{font:200 58px/1 system-ui,sans-serif; letter-spacing:-2px; font-variant-numeric:tabular-nums}
   .now .desc{font:15px system-ui,sans-serif; color:var(--soft)}
-  .stats{display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-top:14px}
-  .stat{background:var(--accent-soft); border-radius:10px; padding:8px 10px}
-  .stat b{display:block; font:600 16px system-ui,sans-serif; font-variant-numeric:tabular-nums}
-  .stat span{font:11px system-ui,sans-serif; color:var(--soft); text-transform:uppercase; letter-spacing:.06em}
+  .stats{display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin-top:14px}
+  .stat{background:var(--accent-soft); border-radius:10px; padding:8px 8px}
+  .stat b{display:block; font:600 15px system-ui,sans-serif; font-variant-numeric:tabular-nums; white-space:nowrap}
+  .stat span{font:10px system-ui,sans-serif; color:var(--soft); text-transform:uppercase; letter-spacing:.05em}
+  .stat.aqi-bad{background:var(--alert-amber-soft)}
+  .stat.aqi-bad b{color:var(--alert-amber)}
+  .stat.aqi-vbad{background:var(--alert-red-soft)}
+  .stat.aqi-vbad b{color:var(--alert-red)}
   h2{font:600 13px system-ui,sans-serif; color:var(--soft); text-transform:uppercase; letter-spacing:.08em; margin:0 0 10px}
+  /* alerts */
+  .alert{border-radius:14px; padding:12px 14px; margin-bottom:12px; cursor:pointer; border:1px solid transparent}
+  .alert.sev-high{background:var(--alert-red-soft); border-color:var(--alert-red)}
+  .alert.sev-med{background:var(--alert-amber-soft); border-color:var(--alert-amber)}
+  .alert.sev-low{background:var(--card); border-color:var(--line)}
+  .alert .head{display:flex; align-items:center; gap:8px; font:600 15px system-ui,sans-serif}
+  .alert.sev-high .head{color:var(--alert-red)}
+  .alert.sev-med .head{color:var(--alert-amber)}
+  .alert .until{font:12px system-ui,sans-serif; color:var(--soft); margin-top:2px}
+  .alert .body{display:none; font:13px/1.5 system-ui,sans-serif; color:var(--ink);
+    margin-top:8px; white-space:pre-wrap; max-height:260px; overflow-y:auto}
+  .alert.open .body{display:block}
+  .alert .chev{margin-left:auto; color:var(--soft); font-size:12px}
+  /* radar */
+  #radar-card{padding:0; overflow:hidden}
+  #radar-card h2{padding:16px 16px 0}
+  #map{height:300px; width:100%; background:var(--line)}
+  .radar-bar{display:flex; align-items:center; gap:10px; padding:10px 16px}
+  #radar-play{font:600 14px system-ui,sans-serif; background:var(--accent); color:#fff;
+    border:none; border-radius:9px; padding:6px 14px; cursor:pointer; min-width:74px}
+  #radar-time{font:13px system-ui,sans-serif; color:var(--soft); font-variant-numeric:tabular-nums}
+  .leaflet-container{font:11px system-ui,sans-serif}
   .hours{display:flex; gap:4px; overflow-x:auto; padding-bottom:4px; -webkit-overflow-scrolling:touch}
   .hour{flex:0 0 60px; text-align:center; padding:8px 2px; border-radius:10px}
   .hour.now-h{background:var(--accent-soft)}
@@ -69,9 +98,11 @@
   <button id="go" aria-label="Search">Go</button>
 </header>
 <div id="results" role="listbox"></div>
+<div id="alerts"></div>
 <div id="app"><p id="status">Loading weather…</p></div>
-<footer>Data: <a href="https://open-meteo.com/" rel="noopener">Open-Meteo</a> · updates on load</footer>
+<footer>Data: <a href="https://open-meteo.com/" rel="noopener">Open-Meteo</a> · alerts: <a href="https://www.weather.gov/" rel="noopener">NWS</a> · radar: <a href="https://www.rainviewer.com/" rel="noopener">RainViewer</a></footer>
 
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 const DEFAULT_LOC = { name:"Oswego, IL", lat:41.6828, lon:-88.3515 };
 const WMO = {
@@ -89,14 +120,133 @@ const WMO = {
 const wmo = c => WMO[c] || ["🌡️","—"];
 const $ = id => document.getElementById(id);
 
+const ALERT_ICON = e => {
+  e = e.toLowerCase();
+  if(e.includes("tornado")) return "🌪️";
+  if(e.includes("thunder")) return "⛈️";
+  if(e.includes("flood")) return "🌊";
+  if(e.includes("winter")||e.includes("snow")||e.includes("ice")||e.includes("blizzard")) return "❄️";
+  if(e.includes("heat")) return "🥵";
+  if(e.includes("wind")) return "💨";
+  if(e.includes("air quality")) return "😮‍💨";
+  if(e.includes("fire")||e.includes("red flag")) return "🔥";
+  return "⚠️";
+};
+function aqiInfo(v){
+  if(v == null) return null;
+  if(v <= 50)  return {label:"Good", cls:""};
+  if(v <= 100) return {label:"Moderate", cls:""};
+  if(v <= 150) return {label:"Unhealthy (sens.)", cls:"aqi-bad"};
+  if(v <= 200) return {label:"Unhealthy", cls:"aqi-vbad"};
+  if(v <= 300) return {label:"Very unhealthy", cls:"aqi-vbad"};
+  return {label:"Hazardous", cls:"aqi-vbad"};
+}
+
 function loadLoc(){
   try{ const s = JSON.parse(localStorage.getItem("wx-loc")); if(s && s.lat) return s; }catch(e){}
   return DEFAULT_LOC;
 }
 function saveLoc(l){ try{ localStorage.setItem("wx-loc", JSON.stringify(l)); }catch(e){} }
 
+/* ---------- alerts (NWS, US only) ---------- */
+async function fetchAlerts(loc){
+  const box = $("alerts");
+  box.innerHTML = "";
+  try{
+    const r = await fetch(`https://api.weather.gov/alerts/active?point=${loc.lat.toFixed(4)},${loc.lon.toFixed(4)}`,
+      { headers:{ "Accept":"application/geo+json" } });
+    if(!r.ok) return; // outside US or NWS down — silently skip
+    const d = await r.json();
+    if(!d.features || !d.features.length) return;
+    // dedupe by event name, keep most recent
+    const seen = new Set();
+    d.features.forEach(f => {
+      const p = f.properties;
+      if(seen.has(p.event)) return;
+      seen.add(p.event);
+      const sev = /tornado|extreme/i.test(p.event) || p.severity === "Extreme" ? "sev-high"
+        : (p.severity === "Severe" ? "sev-high" : (p.severity === "Moderate" ? "sev-med" : "sev-low"));
+      const until = p.ends || p.expires;
+      const untilTxt = until ? "Until " + new Date(until).toLocaleString([], {weekday:"short", hour:"numeric", minute:"2-digit"}) : "";
+      const div = document.createElement("div");
+      div.className = "alert " + sev;
+      div.setAttribute("role","button");
+      div.setAttribute("tabindex","0");
+      div.innerHTML = `<div class="head"><span>${ALERT_ICON(p.event)}</span><span>${p.event}</span><span class="chev">details ▾</span></div>
+        <div class="until">${untilTxt}</div>
+        <div class="body"></div>`;
+      div.querySelector(".body").textContent = (p.description || p.headline || "").trim();
+      const toggle = () => div.classList.toggle("open");
+      div.addEventListener("click", toggle);
+      div.addEventListener("keydown", e => { if(e.key==="Enter"||e.key===" "){ e.preventDefault(); toggle(); } });
+      box.appendChild(div);
+    });
+  }catch(e){ /* network fail — no alerts shown */ }
+}
+
+/* ---------- air quality ---------- */
+async function fetchAQI(loc){
+  try{
+    const r = await fetch(`https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${loc.lat}&longitude=${loc.lon}&current=us_aqi`);
+    const d = await r.json();
+    return d.current ? d.current.us_aqi : null;
+  }catch(e){ return null; }
+}
+
+/* ---------- radar ---------- */
+let map = null, radarLayers = [], radarFrames = [], radarIdx = 0, radarTimer = null;
+function initRadar(loc){
+  const host = "https://tilecache.rainviewer.com";
+  if(!map){
+    map = L.map("map", { zoomControl:false, attributionControl:true });
+    L.control.zoom({ position:"topright" }).addTo(map);
+    L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png",
+      { attribution:'&copy; OpenStreetMap &copy; CARTO', maxZoom:12 }).addTo(map);
+  }
+  map.setView([loc.lat, loc.lon], 7);
+  // clear old frames
+  radarLayers.forEach(l => map.removeLayer(l)); radarLayers = []; radarFrames = [];
+  if(radarTimer){ clearInterval(radarTimer); radarTimer = null; $("radar-play").textContent = "▶ Play"; }
+  fetch("https://api.rainviewer.com/public/weather-maps.json")
+    .then(r => r.json())
+    .then(d => {
+      const frames = (d.radar.past || []).slice(-7).concat(d.radar.nowcast || []);
+      radarFrames = frames;
+      frames.forEach((f, i) => {
+        const layer = L.tileLayer(`${d.host}${f.path}/256/{z}/{x}/{y}/2/1_1.png`,
+          { opacity: 0, maxZoom:12 });
+        layer.addTo(map);
+        radarLayers.push(layer);
+      });
+      radarIdx = Math.max(0, (d.radar.past || []).slice(-7).length - 1); // latest past frame
+      showFrame(radarIdx);
+    })
+    .catch(() => { $("radar-time").textContent = "Radar unavailable"; });
+}
+function showFrame(i){
+  radarLayers.forEach((l, j) => l.setOpacity(j === i ? 0.75 : 0));
+  const f = radarFrames[i];
+  if(f) $("radar-time").textContent = new Date(f.time * 1000).toLocaleTimeString([], {hour:"numeric", minute:"2-digit"}) + (f.path.includes("nowcast") ? " (forecast)" : "");
+}
+function toggleRadar(){
+  if(radarTimer){
+    clearInterval(radarTimer); radarTimer = null;
+    $("radar-play").textContent = "▶ Play";
+  }else{
+    if(!radarFrames.length) return;
+    $("radar-play").textContent = "⏸ Pause";
+    radarTimer = setInterval(() => {
+      radarIdx = (radarIdx + 1) % radarFrames.length;
+      showFrame(radarIdx);
+    }, 550);
+  }
+}
+
+/* ---------- forecast ---------- */
 async function fetchWeather(loc){
   $("app").innerHTML = '<p id="status">Loading weather…</p>';
+  fetchAlerts(loc); // parallel, independent
+  const aqiPromise = fetchAQI(loc);
   const u = new URL("https://api.open-meteo.com/v1/forecast");
   u.search = new URLSearchParams({
     latitude:loc.lat, longitude:loc.lon,
@@ -115,14 +265,15 @@ async function fetchWeather(loc){
     $("app").innerHTML = '<p id="status">Couldn’t load weather — check connection and retry.<br>('+err.message+')</p>';
     return;
   }
-  render(loc, d);
+  render(loc, d, await aqiPromise);
+  initRadar(loc);
 }
 
-function render(loc, d){
+function render(loc, d, aqi){
   const c = d.current, [ce, cd] = wmo(c.weather_code);
   const sunrise = d.daily.sunrise[0].slice(11), sunset = d.daily.sunset[0].slice(11);
+  const aq = aqiInfo(aqi);
 
-  // hourly: from current hour, next 24
   const nowIso = c.time.slice(0,13);
   let start = d.hourly.time.findIndex(t => t.slice(0,13) === nowIso);
   if(start < 0) start = 0;
@@ -165,14 +316,27 @@ function render(loc, d){
       <div class="stats">
         <div class="stat"><b>${Math.round(c.wind_speed_10m)} mph</b><span>wind</span></div>
         <div class="stat"><b>${c.relative_humidity_2m}%</b><span>humidity</span></div>
-        <div class="stat"><b>${sunrise} / ${sunset}</b><span>sun</span></div>
+        ${aq ? `<div class="stat ${aq.cls}"><b>${Math.round(aqi)}</b><span>AQI · ${aq.label}</span></div>`
+             : `<div class="stat"><b>—</b><span>AQI</span></div>`}
+        <div class="stat"><b>${sunrise}</b><span>☀︎ ${sunset}</span></div>
+      </div>
+    </div>
+    <div class="card" id="radar-card">
+      <h2>Radar</h2>
+      <div id="map"></div>
+      <div class="radar-bar">
+        <button id="radar-play">▶ Play</button>
+        <span id="radar-time">Loading radar…</span>
       </div>
     </div>
     <div class="card"><h2>Next 24 hours</h2><div class="hours">${hoursHtml}</div></div>
     <div class="card"><h2>7-day</h2>${daysHtml}</div>`;
+  $("radar-play").addEventListener("click", toggleRadar);
+  map = null; // container was rebuilt — force fresh Leaflet init
   document.title = `${Math.round(c.temperature_2m)}° — ${loc.name.split(",")[0]}`;
 }
 
+/* ---------- search ---------- */
 async function search(){
   const q = $("q").value.trim();
   if(!q) return;
